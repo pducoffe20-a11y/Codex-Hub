@@ -63,6 +63,7 @@ function App() {
   const [activeTargetId, setActiveTargetId] = useState(targets[0]?.id ?? '');
   const [rawIngest, setRawIngest] = useState('Acme Corp, Jamie Rivera, CRO, B2B SaaS, https://acme.example, Hiring SDRs and wrestling with CRM hygiene');
   const [apiStatus, setApiStatus] = useState('Ready — OpenAI is preferred when OPENAI_API_KEY is configured; Anthropic is used as the alternate provider.');
+  const [apiStatus, setApiStatus] = useState('Ready');
   const [autoGenerate, setAutoGenerate] = useState(true);
 
   useEffect(() => {
@@ -178,6 +179,7 @@ function App() {
           <p className="eyebrow">Codex Hub</p>
           <h1>AI-assisted outreach command center</h1>
           <p>Parse messy account lists, research lead-management signals, match customer proof, and generate concise outbound drafts with OpenAI-first performance and Anthropic failover.</p>
+          <p>Parse messy account lists, research lead-management signals, match customer proof, and generate concise outbound drafts.</p>
         </div>
         <div className="hero-actions">
           <button onClick={addBlank}>New target</button>

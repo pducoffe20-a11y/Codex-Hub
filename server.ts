@@ -33,6 +33,11 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4.1-mini';
 
 type CacheEntry = { expiresAt: number; value: unknown };
 type AiResult = { data: unknown; source: string; error?: string; cached?: boolean };
+const isProduction = process.env.NODE_ENV === 'production';
+const PORT = Number(process.env.PORT ?? 3000);
+const CLAUDE_MODEL = 'claude-opus-4-8';
+
+type CacheEntry = { expiresAt: number; value: unknown };
 type TargetPayload = {
   company?: string;
   contactName?: string;
@@ -195,6 +200,41 @@ async function callAiJson(prompt: string, fallback: () => unknown) {
   const value = { data: fallback(), source, error };
   setCached(cacheKey, value, 1000 * 60 * 5);
   return value;
+async function callClaudeJson(prompt: string, fallback: () => unknown) {
+  if (!anthropicApiKey) return { data: fallback(), source: 'fallback:no-api-key' };
+
+  const cacheKey = `claude:${stableHash({ prompt, model: CLAUDE_MODEL })}`;
+  const cached = getCached<{ data: unknown; source: string }>(cacheKey);
+  if (cached) return { ...cached, cached: true };
+
+  try {
+    const apiResponse = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': anthropicApiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 1800,
+        temperature: 0.2,
+        messages: [{ role: 'user', content: `${prompt}\n\nReturn only valid JSON. Do not include markdown.` }]
+      })
+    });
+    if (!apiResponse.ok) throw new Error(`Anthropic request failed with ${apiResponse.status}: ${await apiResponse.text()}`);
+    const response = await apiResponse.json() as { content?: Array<{ type?: string; text?: string }> };
+    const parsed = extractJson(textFromClaudeResponse(response));
+    const value = { data: parsed, source: 'anthropic' };
+    setCached(cacheKey, value);
+    return value;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const rateLimited = /rate|429|overloaded|quota/i.test(message);
+    const value = { data: fallback(), source: rateLimited ? 'fallback:rate-limited' : 'fallback:error', error: message };
+    setCached(cacheKey, value, 1000 * 60 * 5);
+    return value;
+  }
 }
 
 function derivePains(text: string) {
@@ -278,6 +318,15 @@ app.post('/api/research-lms', async (req, res) => {
   if (cached) return res.json({ ...cached, cached: true });
 
   const result = await callAiJson(
+app.get('/api/health', (_req, res) => res.json({ ok: true, model: CLAUDE_MODEL, cacheEntries: cache.size }));
+
+app.post('/api/research-lms', async (req, res) => {
+  const target = req.body?.target ?? req.body ?? {};
+  const cacheKey = `research:${stableHash(target)}`;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const result = await callClaudeJson(
     `Research this lead management / sales account from the supplied fields. Identify likely pains, buying triggers, and a recommended next step. Account: ${JSON.stringify(target)}`,
     () => researchFallback(target)
   );
@@ -292,6 +341,11 @@ app.post('/api/parse-messy-file', async (req, res) => {
   if (cached) return res.json({ ...cached, cached: true });
 
   const result = await callAiJson(
+  const cacheKey = `parse:${stableHash(content)}`;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const result = await callClaudeJson(
     `Convert this messy prospect list into JSON with a targets array. Each target should include company, contactName, title, industry, website, linkedin, notes, and status. Content: ${content.slice(0, 16000)}`,
     () => parseMessyFallback(content)
   );
@@ -306,6 +360,11 @@ app.post('/api/generate-outreach', async (req, res) => {
   if (cached) return res.json({ ...cached, cached: true });
 
   const result = await callAiJson(
+  const cacheKey = `outreach:${stableHash(target)}`;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const result = await callClaudeJson(
     `Write a concise B2B outbound email for this target. Include JSON fields subject, body, and rationale. Keep the body under 140 words, plain spoken, and anchored in the target pain and customer story. Target: ${JSON.stringify(target)}`,
     () => outreachFallback(target)
   );
