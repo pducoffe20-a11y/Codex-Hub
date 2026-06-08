@@ -1,9 +1,38 @@
 import express from 'express';
 import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = process.cwd();
+
+function loadLocalEnv() {
+  const envPath = path.join(projectRoot, '.env');
+  if (!existsSync(envPath)) return;
+
+  for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const separatorIndex = trimmed.indexOf('=');
+    if (separatorIndex === -1) continue;
+
+    const key = trimmed.slice(0, separatorIndex).trim();
+    const rawValue = trimmed.slice(separatorIndex + 1).trim();
+    const value = rawValue.replace(/^['"]|['"]$/g, '');
+    if (key && process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+loadLocalEnv();
+
+const isProduction = process.env.NODE_ENV === 'production';
+const PORT = Number(process.env.PORT ?? 3000);
+const CLAUDE_MODEL = process.env.ANTHROPIC_MODEL ?? 'claude-opus-4-8';
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? 'gpt-4.1-mini';
+
+type CacheEntry = { expiresAt: number; value: unknown };
+type AiResult = { data: unknown; source: string; error?: string; cached?: boolean };
 const isProduction = process.env.NODE_ENV === 'production';
 const PORT = Number(process.env.PORT ?? 3000);
 const CLAUDE_MODEL = 'claude-opus-4-8';
@@ -24,6 +53,8 @@ type TargetPayload = {
 const app = express();
 const cache = new Map<string, CacheEntry>();
 const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+const openaiApiKey = process.env.OPENAI_API_KEY;
+const providerPreference = (process.env.AI_PROVIDER ?? (openaiApiKey ? 'openai' : 'anthropic')).toLowerCase();
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -78,6 +109,97 @@ function textFromClaudeResponse(response: { content?: Array<{ type?: string; tex
     .join('\n');
 }
 
+function textFromOpenAiResponse(response: { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> }) {
+  if (response.output_text) return response.output_text;
+  return (response.output ?? [])
+    .flatMap((item) => item.content ?? [])
+    .map((block) => block.text ?? '')
+    .filter(Boolean)
+    .join('\n');
+}
+
+async function callClaudeJson(prompt: string): Promise<AiResult> {
+  if (!anthropicApiKey) throw new Error('Anthropic API key is not configured.');
+
+  const apiResponse = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': anthropicApiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 1800,
+      temperature: 0.2,
+      messages: [{ role: 'user', content: `${prompt}\n\nReturn only valid JSON. Do not include markdown.` }]
+    })
+  });
+  if (!apiResponse.ok) throw new Error(`Anthropic request failed with ${apiResponse.status}: ${await apiResponse.text()}`);
+  const response = await apiResponse.json() as { content?: Array<{ type?: string; text?: string }> };
+  return { data: extractJson(textFromClaudeResponse(response)), source: `anthropic:${CLAUDE_MODEL}` };
+}
+
+async function callOpenAiJson(prompt: string): Promise<AiResult> {
+  if (!openaiApiKey) throw new Error('OpenAI API key is not configured.');
+
+  const apiResponse = await fetch('https://api.openai.com/v1/responses', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${openaiApiKey}`
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      input: [
+        {
+          role: 'developer',
+          content: 'You generate compact, production-ready JSON for a B2B outreach workflow. Return JSON only.'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      temperature: 0.2,
+      max_output_tokens: 1800,
+      text: {
+        format: { type: 'json_object' }
+      }
+    })
+  });
+  if (!apiResponse.ok) throw new Error(`OpenAI request failed with ${apiResponse.status}: ${await apiResponse.text()}`);
+  const response = await apiResponse.json() as { output_text?: string; output?: Array<{ content?: Array<{ type?: string; text?: string }> }> };
+  return { data: extractJson(textFromOpenAiResponse(response)), source: `openai:${OPENAI_MODEL}` };
+}
+
+async function callAiJson(prompt: string, fallback: () => unknown) {
+  const cacheKey = `ai:${stableHash({ prompt, anthropicModel: CLAUDE_MODEL, openaiModel: OPENAI_MODEL, providerPreference })}`;
+  const cached = getCached<AiResult>(cacheKey);
+  if (cached) return { ...cached, cached: true };
+
+  const providers = providerPreference === 'anthropic'
+    ? [callClaudeJson, callOpenAiJson]
+    : [callOpenAiJson, callClaudeJson];
+  const errors: string[] = [];
+
+  for (const provider of providers) {
+    try {
+      const value = await provider(prompt);
+      setCached(cacheKey, value);
+      return value;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errors.push(message);
+    }
+  }
+
+  const error = errors.join(' | ');
+  const rateLimited = /rate|429|overloaded|quota/i.test(error);
+  const source = rateLimited ? 'fallback:rate-limited' : 'fallback:no-ai-provider';
+  const value = { data: fallback(), source, error };
+  setCached(cacheKey, value, 1000 * 60 * 5);
+  return value;
 async function callClaudeJson(prompt: string, fallback: () => unknown) {
   if (!anthropicApiKey) return { data: fallback(), source: 'fallback:no-api-key' };
 
@@ -177,6 +299,25 @@ function outreachFallback(target: TargetPayload) {
   };
 }
 
+app.get('/api/health', (_req, res) => res.json({
+  ok: true,
+  providerPreference,
+  openaiModel: OPENAI_MODEL,
+  anthropicModel: CLAUDE_MODEL,
+  configuredProviders: {
+    openai: Boolean(openaiApiKey),
+    anthropic: Boolean(anthropicApiKey)
+  },
+  cacheEntries: cache.size
+}));
+
+app.post('/api/research-lms', async (req, res) => {
+  const target = req.body?.target ?? req.body ?? {};
+  const cacheKey = `research:${stableHash({ target, providerPreference, OPENAI_MODEL, CLAUDE_MODEL })}`;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const result = await callAiJson(
 app.get('/api/health', (_req, res) => res.json({ ok: true, model: CLAUDE_MODEL, cacheEntries: cache.size }));
 
 app.post('/api/research-lms', async (req, res) => {
@@ -195,6 +336,11 @@ app.post('/api/research-lms', async (req, res) => {
 
 app.post('/api/parse-messy-file', async (req, res) => {
   const content = String(req.body?.content ?? '');
+  const cacheKey = `parse:${stableHash({ content, providerPreference, OPENAI_MODEL, CLAUDE_MODEL })}`;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const result = await callAiJson(
   const cacheKey = `parse:${stableHash(content)}`;
   const cached = getCached(cacheKey);
   if (cached) return res.json({ ...cached, cached: true });
@@ -209,6 +355,11 @@ app.post('/api/parse-messy-file', async (req, res) => {
 
 app.post('/api/generate-outreach', async (req, res) => {
   const target = req.body?.target ?? {};
+  const cacheKey = `outreach:${stableHash({ target, providerPreference, OPENAI_MODEL, CLAUDE_MODEL })}`;
+  const cached = getCached(cacheKey);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  const result = await callAiJson(
   const cacheKey = `outreach:${stableHash(target)}`;
   const cached = getCached(cacheKey);
   if (cached) return res.json({ ...cached, cached: true });
@@ -238,4 +389,5 @@ await attachFrontend();
 
 app.listen(PORT, () => {
   console.log(`Codex Hub Outreach Lab listening on http://localhost:${PORT}`);
+  console.log(`AI provider preference: ${providerPreference}; OpenAI=${openaiApiKey ? OPENAI_MODEL : 'not configured'}; Anthropic=${anthropicApiKey ? CLAUDE_MODEL : 'not configured'}`);
 });

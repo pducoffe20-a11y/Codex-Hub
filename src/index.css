@@ -78,3 +78,35 @@ label { display: grid; gap: 0.35rem; font-weight: 700; color: #36445a; }
   .hero { display: grid; }
   .dashboard-grid, .form-grid, .two-column, .metric-grid { grid-template-columns: 1fr; }
 }
+
+.setup-card {
+  align-items: center;
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.14), rgba(14, 165, 233, 0.1));
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: 20px;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+  padding: 1rem 1.2rem;
+}
+
+.setup-card p {
+  color: #334155;
+  margin: 0.25rem 0 0;
+}
+
+.setup-card code {
+  background: rgba(15, 23, 42, 0.08);
+  border-radius: 10px;
+  color: #0f172a;
+  padding: 0.25rem 0.45rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .setup-card {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

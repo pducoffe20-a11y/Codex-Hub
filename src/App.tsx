@@ -62,6 +62,7 @@ function App() {
   });
   const [activeTargetId, setActiveTargetId] = useState(targets[0]?.id ?? '');
   const [rawIngest, setRawIngest] = useState('Acme Corp, Jamie Rivera, CRO, B2B SaaS, https://acme.example, Hiring SDRs and wrestling with CRM hygiene');
+  const [apiStatus, setApiStatus] = useState('Ready — OpenAI is preferred when OPENAI_API_KEY is configured; Anthropic is used as the alternate provider.');
   const [apiStatus, setApiStatus] = useState('Ready');
   const [autoGenerate, setAutoGenerate] = useState(true);
 
@@ -177,6 +178,7 @@ function App() {
         <div>
           <p className="eyebrow">Codex Hub</p>
           <h1>AI-assisted outreach command center</h1>
+          <p>Parse messy account lists, research lead-management signals, match customer proof, and generate concise outbound drafts with OpenAI-first performance and Anthropic failover.</p>
           <p>Parse messy account lists, research lead-management signals, match customer proof, and generate concise outbound drafts.</p>
         </div>
         <div className="hero-actions">
@@ -184,6 +186,14 @@ function App() {
           <label className="toggle"><input type="checkbox" checked={autoGenerate} onChange={(event) => setAutoGenerate(event.target.checked)} /> Debounced auto-generation</label>
         </div>
       </header>
+
+      <section className="setup-card" aria-label="API key setup">
+        <div>
+          <strong>API key setup</strong>
+          <p>Paste secrets into a local <code>.env</code> file (copy <code>.env.example</code> first). Use <code>OPENAI_API_KEY</code> for the preferred OpenAI path and <code>ANTHROPIC_API_KEY</code> for Anthropic failover.</p>
+        </div>
+        <code>cp .env.example .env</code>
+      </section>
 
       <section className="dashboard-grid">
         <article className="card stat"><span>Total targets</span><strong>{stats.total}</strong></article>
